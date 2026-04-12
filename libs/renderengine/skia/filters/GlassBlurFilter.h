@@ -20,6 +20,9 @@
 #include <SkImage.h>
 #include <SkRuntimeEffect.h>
 #include <SkSurface.h>
+
+#include <array>
+
 #include "BlurFilter.h"
 
 #include "RuntimeEffectManager.h"
@@ -35,12 +38,28 @@ public:
 
     sk_sp<SkImage> generate(SkiaGpuContext* context, const uint32_t radius,
                             const sk_sp<SkImage> blurInput, const SkRect& blurRect) const override;
+    uint32_t effectiveRadius(uint32_t radius) const override;
 
 private:
     sk_sp<SkRuntimeEffect> mQuarterResDownSampleBlurEffect;
     sk_sp<SkRuntimeEffect> mHalfResDownSampleBlurEffect;
     sk_sp<SkRuntimeEffect> mUpSampleBlurEffect;
-    sk_sp<SkRuntimeEffect> mFinalUpSampleBlurEffect;
+    sk_sp<SkRuntimeEffect> mRotatedUpSampleBlurEffect;
+
+    static constexpr int kMaxSurfaces = 6;
+    static constexpr int kSurfaceRingSize = 5;
+
+    struct SurfaceSlot {
+        SkImageInfo info;
+        SkiaGpuContext* context = nullptr;
+        sk_sp<SkSurface> surface;
+    };
+
+    mutable std::array<std::array<SurfaceSlot, kSurfaceRingSize>, kMaxSurfaces> mSurfaces;
+    mutable std::array<int, kMaxSurfaces> mNextSurface = {};
+
+    sk_sp<SkSurface> obtainSurface(SkiaGpuContext* context, const SkImageInfo& info,
+                                   int index) const;
 
     void blurInto(const sk_sp<SkSurface>& drawSurface, const sk_sp<SkImage>& readImage,
                   const float radius, const float alpha, const sk_sp<SkRuntimeEffect>&) const;

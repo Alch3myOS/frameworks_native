@@ -955,7 +955,7 @@ void SkiaRenderEngine::drawLayersInternal(
         if (mBlurFilter && layerHasBlur(layer, ctModifiesAlpha)) {
             std::unordered_map<uint32_t, sk_sp<SkImage>> cachedBlurs;
 
-            auto computeBlurInputHash = [&]() -> uint64_t {
+            auto computeBlurInputHash = [&]() -> std::pair<bool, uint64_t> {
                 uint64_t h = 14695981039346656037ULL;
                 const auto mix = [&h](uint64_t v) {
                     h ^= v;
@@ -969,7 +969,11 @@ void SkiaRenderEngine::drawLayersInternal(
                 for (const auto& l : layers) {
                     if (&l == &layer) break;
                     if (l.source.buffer.buffer) {
+                        if (l.source.buffer.frameNumber == 0) {
+                            return {false, 0};
+                        }
                         mix(l.source.buffer.buffer->getId());
+                        mix(l.source.buffer.frameNumber);
                     }
                     mixFloat(float(l.alpha));
                     const auto& m = l.geometry.positionTransform;
@@ -984,7 +988,7 @@ void SkiaRenderEngine::drawLayersInternal(
                     mixFloat(b.right);
                     mixFloat(b.bottom);
                 }
-                return h;
+                return {true, h};
             };
 
             auto lookupBlurCache = [&](uint32_t radius, const SkIRect& rect,
@@ -1063,49 +1067,54 @@ void SkiaRenderEngine::drawLayersInternal(
                 }
 
                 const SkIRect blurRectI = blurRect.roundOut();
-                const uint64_t blurInputHash =
-                        (layer.backgroundBlurRadius > 0 || !layer.blurRegions.empty())
-                                ? computeBlurInputHash()
-                                : 0;
+                const auto [cacheableBlurInput, blurInputHash] = computeBlurInputHash();
 
                 if (layer.backgroundBlurRadius > 0) {
+                    const uint32_t blurRadius =
+                            mBlurFilter->effectiveRadius(layer.backgroundBlurRadius);
                     SFTRACE_NAME("BackgroundBlur");
-                    sk_sp<SkImage> blurredImage =
-                            lookupBlurCache(layer.backgroundBlurRadius, blurRectI,
-                                            blurInputHash);
+                    sk_sp<SkImage> blurredImage;
+                    if (cacheableBlurInput) {
+                        blurredImage = lookupBlurCache(blurRadius, blurRectI, blurInputHash);
+                    }
                     if (!blurredImage) {
-                        blurredImage =
-                                mBlurFilter->generate(context, layer.backgroundBlurRadius,
-                                                      blurInput, blurRect);
-                        storeBlurCache(blurredImage, layer.backgroundBlurRadius, blurRectI,
-                                       blurInputHash);
+                        blurredImage = mBlurFilter->generate(context, blurRadius, blurInput,
+                                                             blurRect);
+                        if (cacheableBlurInput) {
+                            storeBlurCache(blurredImage, blurRadius, blurRectI, blurInputHash);
+                        }
                     }
 
-                    cachedBlurs[layer.backgroundBlurRadius] = blurredImage;
+                    cachedBlurs[blurRadius] = blurredImage;
 
-                    mBlurFilter->drawBlurRegion(canvas, bounds, layer.backgroundBlurRadius,
-                                                layer.backgroundBlurScale, 1.0f,
-                                                blurRect, blurredImage, blurInput);
+                    mBlurFilter->drawBlurRegion(canvas, bounds, blurRadius,
+                                                layer.backgroundBlurScale, 1.0f, blurRect,
+                                                blurredImage, blurInput);
                 }
 
                 canvas->concat(getSkM44(layer.blurRegionTransform).asM33());
                 for (auto region : layer.blurRegions) {
-                    if (cachedBlurs[region.blurRadius] == nullptr) {
+                    const uint32_t blurRadius = mBlurFilter->effectiveRadius(region.blurRadius);
+                    if (cachedBlurs[blurRadius] == nullptr) {
                         SFTRACE_NAME("BlurRegion");
-                        sk_sp<SkImage> blurredImage =
-                                lookupBlurCache(region.blurRadius, blurRectI, blurInputHash);
-                        if (!blurredImage) {
-                            blurredImage = mBlurFilter->generate(context, region.blurRadius,
-                                                                 blurInput, blurRect);
-                            storeBlurCache(blurredImage, region.blurRadius, blurRectI,
-                                           blurInputHash);
+                        sk_sp<SkImage> blurredImage;
+                        if (cacheableBlurInput) {
+                            blurredImage = lookupBlurCache(blurRadius, blurRectI, blurInputHash);
                         }
-                        cachedBlurs[region.blurRadius] = blurredImage;
+                        if (!blurredImage) {
+                            blurredImage =
+                                    mBlurFilter->generate(context, blurRadius, blurInput, blurRect);
+                            if (cacheableBlurInput) {
+                                storeBlurCache(blurredImage, blurRadius, blurRectI,
+                                               blurInputHash);
+                            }
+                        }
+                        cachedBlurs[blurRadius] = blurredImage;
                     }
 
-                    mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region), region.blurRadius,
-                                                1.0f, region.alpha, blurRect,
-                                                cachedBlurs[region.blurRadius], blurInput);
+                    mBlurFilter->drawBlurRegion(canvas, getBlurRRect(region), blurRadius, 1.0f,
+                                                region.alpha, blurRect, cachedBlurs[blurRadius],
+                                                blurInput);
                 }
             }
         }
